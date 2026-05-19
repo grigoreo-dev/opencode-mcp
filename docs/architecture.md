@@ -5,11 +5,12 @@
 opencode-mcp is a **stdio-based MCP server** that bridges MCP clients to the OpenCode headless HTTP API.
 
 ```
-┌─────────────┐     stdio      ┌───────────────┐     HTTP      ┌──────────────────┐
-│  MCP Client  │ <────────────> │  opencode-mcp  │ <──────────> │  OpenCode Server │
-│  (Claude,    │   JSON-RPC     │  (this package) │   REST API   │  (opencode serve)│
-│   Cursor)    │                │                 │              │                  │
-└─────────────┘                └───────────────┘              └──────────────────┘
+┌─────────────┐     stdio      ┌───────────────┐     HTTP      ┌─────────────────────────┐
+│  MCP Client  │ <────────────> │  opencode-mcp  │ <──────────> │  OpenCode Server        │
+│  (Claude,    │   JSON-RPC     │  (this package) │   REST API   │  (in-process via SDK,   │
+│   Cursor)    │                │                 │              │   or external `opencode │
+│              │                │                 │              │   serve` you launched)  │
+└─────────────┘                └───────────────┘              └─────────────────────────┘
 ```
 
 ## Project Structure
@@ -17,7 +18,7 @@ opencode-mcp is a **stdio-based MCP server** that bridges MCP clients to the Ope
 ```
 src/
 ├── index.ts              Main entry point — creates server, registers everything
-├── server-manager.ts     Auto-detect, find, and start OpenCode server
+├── server-manager.ts     Auto-detect + in-process start via @opencode-ai/sdk
 ├── client.ts             HTTP client with retry, SSE, error categorization
 ├── helpers.ts            Response formatting + tool annotation constants
 ├── resources.ts          MCP Resources (10 browseable data endpoints)
@@ -33,14 +34,14 @@ src/
     ├── misc.ts           System, agents, LSP, MCP, logging (12)
     ├── events.ts         SSE event polling (1)
     ├── global.ts         Health check (1)
-    └── project.ts        Project operations (2)
+    └── project.ts        Project operations (3) — list, init, current
 ```
 
 ## Three MCP Primitives
 
 | Primitive | Count | Purpose |
 |---|---|---|
-| **Tools** | 79 | Actions the LLM can take |
+| **Tools** | 80 | Actions the LLM can take |
 | **Resources** | 10 | Data the LLM can browse |
 | **Prompts** | 6 | Guided multi-step workflows |
 
@@ -91,7 +92,9 @@ This is implemented via `applyModelDefaults()` in `helpers.ts`, called from all 
 
 ### Auto-Start
 
-On startup, the server checks if OpenCode is running (via `/global/health`). If not, it finds the `opencode` binary and spawns `opencode serve` as a child process. The child is cleaned up when the MCP server exits.
+On startup, the MCP probes `OPENCODE_BASE_URL/global/health`. If a server is already running there (e.g. an externally-launched `opencode serve` or another MCP instance), it attaches. Otherwise it spawns one **in-process** via `createOpencodeServer()` from `@opencode-ai/sdk` — the HTTP server binds to the requested host/port from inside the MCP process itself, with no child-process or binary-discovery step. Shutdown handlers (`SIGINT`, `SIGTERM`, `exit`) call the SDK's `close()` so the port is released cleanly when the MCP exits.
+
+Concurrent `ensureServer()` calls are coalesced per `baseUrl` via an in-flight `Map<string, Promise>` so two simultaneous tool calls during cold-start can't race into `EADDRINUSE`. Calls targeting different baseUrls each get their own startup promise.
 
 ## Data Flow
 

@@ -1,6 +1,6 @@
 # Tools Reference
 
-Complete reference for all 79 tools provided by opencode-mcp.
+Complete reference for all 80 tools provided by opencode-mcp.
 
 Every tool accepts an optional `directory` parameter (absolute path) to target a specific project. All tools include [MCP tool annotations](https://modelcontextprotocol.io/docs/concepts/tools#tool-annotations) (`readOnlyHint`, `destructiveHint`) so clients can make informed decisions about tool safety.
 
@@ -321,6 +321,7 @@ Poll for real-time SSE events from the server.
 | Tool | Key Parameters | Description |
 |---|---|---|
 | `opencode_project_list` | — | List all known projects |
+| `opencode_project_init` | `path` (absolute) | Initialize or open a project directory for an independent OpenCode session. Validates the path (rejects NUL bytes, `\r`/`\n`, and system roots like `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/sys`, `/proc`, `/dev`), creates the directory if missing, follows symlinks via `realpath` and re-checks the deny-list against the canonical path, then pings the OpenCode server so it registers as a project. Returns the canonical absolute path to use in subsequent `directory` parameters. |
 | `opencode_project_current` | — | Get the current active project |
 
 ---
