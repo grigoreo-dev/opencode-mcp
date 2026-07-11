@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://cubic.dev/schema/cubic-repository-config.schema.json
+version: 1
+
+reviews:
+    enabled: true
+    sensitivity: medium
+    incremental_commits: true
+    architecture_diagrams: false
+    resolve_threads_when_addressed: true
+    custom_instructions: |
+        Review all repository artifacts in English only. Flag any non-English text
+        in committed files. This is an ESM (type: module) TypeScript project
+        targeting Node >=18 — local imports must use .js extensions and code must
+        not rely on CommonJS. It wraps the OpenCode API via @modelcontextprotocol/sdk
+        and @opencode-ai/sdk; prefer built-in Node modules over new runtime
+        dependencies. stdio is the default MCP transport and must keep working —
+        flag changes that would alter default (non-HTTP) behavior. Do not suggest
+        broad refactors or dependency upgrades unrelated to the PR.
+    ignore:
+        files:
+            - package-lock.json
+            - dist/**
+        pr_labels:
+            - skip-ai-review
+
+pr_descriptions:
+    generate: true
+    instructions: |
+        Keep PR descriptions concise and in English. Include testing evidence and
+        call out deferred follow-up work explicitly.
