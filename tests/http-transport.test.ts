@@ -1,5 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
 import { resolveHttpConfig } from "../src/http-transport.js";
+import { makeHandler } from "../src/http-transport.js";
+
+function mockReq(method: string, url: string, headers: Record<string, string> = {}) {
+  return { method, url, headers } as any;
+}
+function mockRes() {
+  const res: any = {
+    statusCode: 0,
+    headers: {} as Record<string, string>,
+    body: "",
+    setHeader(k: string, v: string) { this.headers[k] = v; },
+    writeHead(code: number) { this.statusCode = code; return this; },
+    end(chunk?: string) { if (chunk) this.body += chunk; },
+  };
+  return res;
+}
 
 describe("resolveHttpConfig", () => {
   it("throws when no token and not insecure", () => {
@@ -39,5 +55,60 @@ describe("resolveHttpConfig", () => {
   it("normalizes a path without leading slash", () => {
     const cfg = resolveHttpConfig({ OPENCODE_MCP_HTTP_TOKEN: "t", OPENCODE_MCP_HTTP_PATH: "mcp" });
     expect(cfg.path).toBe("/mcp");
+  });
+});
+
+describe("makeHandler", () => {
+  it("returns 404 JSON-RPC for a non-matching path and does not call transport", async () => {
+    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
+    const handler = makeHandler({ transport, path: "/mcp", token: "t" });
+    const res = mockRes();
+    handler(mockReq("POST", "/wrong", { authorization: "Bearer t" }), res);
+    await new Promise((r) => setImmediate(r));
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toMatchObject({ jsonrpc: "2.0", id: null });
+    expect(JSON.parse(res.body).error.code).toBe(-32001);
+    expect(transport.handleRequest).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 when token is set and Authorization is missing/wrong", async () => {
+    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
+    const handler = makeHandler({ transport, path: "/mcp", token: "secret" });
+    const res = mockRes();
+    handler(mockReq("POST", "/mcp", { authorization: "Bearer nope" }), res);
+    await new Promise((r) => setImmediate(r));
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.body).error.code).toBe(-32001);
+    expect(transport.handleRequest).not.toHaveBeenCalled();
+  });
+
+  it("delegates to transport.handleRequest on valid path + valid Bearer", async () => {
+    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
+    const handler = makeHandler({ transport, path: "/mcp", token: "secret" });
+    const req = mockReq("POST", "/mcp", { authorization: "Bearer secret" });
+    const res = mockRes();
+    handler(req, res);
+    await new Promise((r) => setImmediate(r));
+    expect(transport.handleRequest).toHaveBeenCalledWith(req, res);
+  });
+
+  it("delegates without auth when no token configured (insecure)", async () => {
+    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
+    const handler = makeHandler({ transport, path: "/mcp" });
+    const req = mockReq("GET", "/mcp");
+    const res = mockRes();
+    handler(req, res);
+    await new Promise((r) => setImmediate(r));
+    expect(transport.handleRequest).toHaveBeenCalledWith(req, res);
+  });
+
+  it("matches path even when a query string is present", async () => {
+    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
+    const handler = makeHandler({ transport, path: "/mcp" });
+    const req = mockReq("POST", "/mcp?foo=bar");
+    const res = mockRes();
+    handler(req, res);
+    await new Promise((r) => setImmediate(r));
+    expect(transport.handleRequest).toHaveBeenCalled();
   });
 });

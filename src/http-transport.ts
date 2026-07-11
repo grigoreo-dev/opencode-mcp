@@ -1,3 +1,5 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+
 export interface HttpConfig {
   host: string;
   port: number;
@@ -41,4 +43,67 @@ export function resolveHttpConfig(
   if (!path.startsWith("/")) path = "/" + path;
 
   return { host, port, path, token, insecure };
+}
+
+interface TransportLike {
+  handleRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body?: unknown,
+  ): Promise<void>;
+}
+
+function sendJsonRpcError(
+  res: ServerResponse,
+  status: number,
+  code: number,
+  message: string,
+): void {
+  const payload = JSON.stringify({
+    jsonrpc: "2.0",
+    error: { code, message },
+    id: null,
+  });
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(payload);
+}
+
+/**
+ * Build the node:http request handler: path routing + optional bearer auth,
+ * then delegate everything (GET/POST/DELETE, body parsing, method dispatch,
+ * JSON-RPC errors) to the transport.
+ */
+export function makeHandler(args: {
+  transport: TransportLike;
+  path: string;
+  token?: string;
+}): (req: IncomingMessage, res: ServerResponse) => void {
+  const { transport, path, token } = args;
+  return (req, res) => {
+    // 1. Route by pathname (ignore query string).
+    const pathname = (req.url || "").split("?")[0];
+    if (pathname !== path) {
+      sendJsonRpcError(res, 404, -32001, "Not found");
+      return;
+    }
+    // 2. Bearer auth when a token is configured.
+    if (token) {
+      const auth = req.headers["authorization"];
+      if (auth !== `Bearer ${token}`) {
+        sendJsonRpcError(res, 401, -32001, "Unauthorized");
+        return;
+      }
+    }
+    // 3. Delegate to the transport (handles method, body, session, errors).
+    void transport.handleRequest(req, res).catch((err) => {
+      console.error(
+        `HTTP transport handleRequest error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      if (!res.headersSent) {
+        sendJsonRpcError(res, 500, -32603, "Internal server error");
+      }
+    });
+  };
 }
