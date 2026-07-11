@@ -56,6 +56,17 @@ MCP Client  <--stdio-->  opencode-mcp  <--HTTP-->  OpenCode Server
 
 Your MCP client calls tools over stdio. This server translates them into HTTP requests to the OpenCode headless API. If no OpenCode server is reachable at `OPENCODE_BASE_URL`, one is started in-process via the official `@opencode-ai/sdk`. The `directory` parameter on every tool routes that request to a specific project via the `x-opencode-directory` header, so a single MCP instance can fan out across many project roots.
 
+### HTTP transport (Streamable HTTP)
+
+By default the server speaks **stdio**. To serve MCP clients over HTTP instead,
+set `OPENCODE_MCP_TRANSPORT=http`. A bearer token is required:
+
+    OPENCODE_MCP_TRANSPORT=http OPENCODE_MCP_HTTP_TOKEN=your-token npx -y opencode-mcp
+
+The endpoint is `http://127.0.0.1:3000/mcp`. Point an HTTP-capable MCP client at
+that URL and send `Authorization: Bearer your-token`. For local dev without a
+token, set `OPENCODE_MCP_HTTP_INSECURE=true` (insecure — localhost only).
+
 ## Key Tools
 
 The 80 tools are organized into tiers. Start with the workflow tools — they handle the common patterns in a single call.
@@ -173,6 +184,12 @@ All optional. Only needed if you've changed defaults on the OpenCode server.
 | `OPENCODE_AUTO_SERVE` | `true` | Auto-start an in-process OpenCode server (via `@opencode-ai/sdk`) if none is reachable at `OPENCODE_BASE_URL` |
 | `OPENCODE_DEFAULT_PROVIDER` | *(none)* | Default provider ID when not specified per-tool (e.g. `anthropic`) |
 | `OPENCODE_DEFAULT_MODEL` | *(none)* | Default model ID when not specified per-tool (e.g. `claude-sonnet-4-5`) |
+| `OPENCODE_MCP_TRANSPORT` | `stdio` | Client-facing MCP transport: `stdio` or `http` (Streamable HTTP) |
+| `OPENCODE_MCP_HTTP_PORT` | `3000` | HTTP listen port (when transport is `http`) |
+| `OPENCODE_MCP_HTTP_HOST` | `127.0.0.1` | HTTP bind interface (`0.0.0.0` to expose) |
+| `OPENCODE_MCP_HTTP_PATH` | `/mcp` | HTTP endpoint path |
+| `OPENCODE_MCP_HTTP_TOKEN` | *(none)* | Bearer token; **required** for `http` unless `OPENCODE_MCP_HTTP_INSECURE=true` |
+| `OPENCODE_MCP_HTTP_INSECURE` | `false` | Allow `http` without a token (dev only; logs a warning) |
 
 ## Development
 
