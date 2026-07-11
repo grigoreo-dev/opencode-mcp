@@ -2,16 +2,19 @@
 
 ## Overview
 
-opencode-mcp is a **stdio-based MCP server** that bridges MCP clients to the OpenCode headless HTTP API.
+opencode-mcp is an MCP server that bridges MCP clients to the OpenCode headless HTTP API. It speaks **stdio** by default, and can optionally serve the same MCP over **Streamable HTTP**.
 
 ```
-┌─────────────┐     stdio      ┌───────────────┐     HTTP      ┌─────────────────────────┐
-│  MCP Client  │ <────────────> │  opencode-mcp  │ <──────────> │  OpenCode Server        │
-│  (Claude,    │   JSON-RPC     │  (this package) │   REST API   │  (in-process via SDK,   │
-│   Cursor)    │                │                 │              │   or external `opencode │
-│              │                │                 │              │   serve` you launched)  │
-└─────────────┘                └───────────────┘              └─────────────────────────┘
+                  stdio (default)
+┌─────────────┐  ──────────────────▶  ┌───────────────┐     HTTP      ┌─────────────────────────┐
+│  MCP Client  │       JSON-RPC        │  opencode-mcp  │ <──────────> │  OpenCode Server        │
+│  (Claude,    │                       │  (this package) │   REST API   │  (in-process via SDK,   │
+│   Cursor)    │  ──────────────────▶  │                 │              │   or external `opencode │
+│              │   Streamable HTTP      │                 │              │   serve` you launched)  │
+└─────────────┘   (POST /mcp, opt-in)  └───────────────┘              └─────────────────────────┘
 ```
+
+The client-facing transport is selected by `OPENCODE_MCP_TRANSPORT`: **stdio** is the default; setting it to `http` starts a Streamable HTTP endpoint (backed by the SDK's `StreamableHTTPServerTransport`) at `http://127.0.0.1:3000/mcp`, guarded by a bearer token (`OPENCODE_MCP_HTTP_TOKEN`, required unless `OPENCODE_MCP_HTTP_INSECURE=true`). This choice is **orthogonal** to how this server reaches the upstream OpenCode API — the outbound HTTP/REST leg to the OpenCode Server (in-process via the SDK or an external `opencode serve`) is identical for both transports.
 
 ## Project Structure
 

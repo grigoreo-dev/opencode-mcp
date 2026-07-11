@@ -12,6 +12,12 @@ All environment variables are **optional**. You only need to set them if you've 
 | `OPENCODE_AUTO_SERVE` | Auto-start `opencode serve` if not running | `true` | No |
 | `OPENCODE_DEFAULT_PROVIDER` | Default provider ID when not specified per-tool | *(none)* | No |
 | `OPENCODE_DEFAULT_MODEL` | Default model ID when not specified per-tool | *(none)* | No |
+| `OPENCODE_MCP_TRANSPORT` | Client-facing MCP transport: `stdio` or `http` (Streamable HTTP) | `stdio` | No |
+| `OPENCODE_MCP_HTTP_PORT` | HTTP listen port (when transport is `http`) | `3000` | No |
+| `OPENCODE_MCP_HTTP_HOST` | HTTP bind interface (`0.0.0.0` to expose) | `127.0.0.1` | No |
+| `OPENCODE_MCP_HTTP_PATH` | HTTP endpoint path | `/mcp` | No |
+| `OPENCODE_MCP_HTTP_TOKEN` | Bearer token; **required** for `http` unless `OPENCODE_MCP_HTTP_INSECURE=true` | *(none)* | Only for `http` |
+| `OPENCODE_MCP_HTTP_INSECURE` | Allow `http` without a token (dev only; logs a warning) | `false` | No |
 
 ### Notes
 
@@ -199,6 +205,36 @@ Then use `opencode-mcp` directly in your config:
   }
 }
 ```
+
+### Connecting over HTTP (Streamable HTTP)
+
+The examples above use the default **stdio** transport, where the client launches
+`opencode-mcp` as a subprocess via `command`/`args`. To connect over HTTP instead,
+start the server with `OPENCODE_MCP_TRANSPORT=http` and a bearer token:
+
+```bash
+OPENCODE_MCP_TRANSPORT=http OPENCODE_MCP_HTTP_TOKEN=your-token npx -y opencode-mcp
+```
+
+Then point an HTTP-capable MCP client at the endpoint URL and send the token as an
+`Authorization: Bearer` header:
+
+```json
+{
+  "mcpServers": {
+    "opencode": {
+      "url": "http://127.0.0.1:3000/mcp",
+      "headers": { "Authorization": "Bearer your-token" }
+    }
+  }
+}
+```
+
+The exact keys for URL-based servers vary by client (some use `url`/`headers`,
+others `serverUrl` or a `transport: "http"` field) — consult your client's docs.
+Keep the stdio (`command`/`args`) example as the default unless you specifically
+need HTTP. For local dev without a token, set `OPENCODE_MCP_HTTP_INSECURE=true`
+(insecure — localhost only).
 
 ## Permissions (Headless Mode)
 
