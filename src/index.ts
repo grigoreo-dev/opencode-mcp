@@ -33,6 +33,7 @@ import { OpenCodeClient } from "./client.js";
 import { ensureServer } from "./server-manager.js";
 import { setModelDefaults } from "./helpers.js";
 import { createServer } from "./server.js";
+import { startHttp } from "./http-transport.js";
 
 const baseUrl =
   process.env.OPENCODE_BASE_URL ?? "http://127.0.0.1:4096";
@@ -47,28 +48,38 @@ setModelDefaults(defaultProvider, defaultModel);
 
 const client = new OpenCodeClient({ baseUrl, username, password, autoServe });
 
-const server = createServer(client);
+const transportKind = process.env.OPENCODE_MCP_TRANSPORT || "stdio";
 
 // ── Start ───────────────────────────────────────────────────────────
 async function main() {
-  // Step 1: Ensure OpenCode server is available (auto-start if needed).
+  // Step 1: Ensure OpenCode (upstream) server is available (auto-start if needed).
   try {
     await ensureServer({ baseUrl, autoServe, username, password });
   } catch (err) {
-    // Log the error but don't prevent MCP from starting — tools will
-    // report connection errors individually, and the server may come
-    // up later.
     console.error(
       `Warning: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  // Step 2: Connect the MCP transport.
+  // Step 2: Select and start the MCP transport.
+  if (transportKind === "http") {
+    await startHttp(client, baseUrl);
+    return;
+  }
+  if (transportKind !== "stdio") {
+    throw new Error(
+      `Unknown OPENCODE_MCP_TRANSPORT="${transportKind}". ` +
+        `Valid values: "stdio" (default) or "http".`,
+    );
+  }
+
+  const server = createServer(client);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  const defaultsInfo = defaultProvider && defaultModel
-    ? ` | defaults: ${defaultProvider}/${defaultModel}`
-    : "";
+  const defaultsInfo =
+    defaultProvider && defaultModel
+      ? ` | defaults: ${defaultProvider}/${defaultModel}`
+      : "";
   console.error(
     `opencode-mcp v1.11.0 started (OpenCode server at ${baseUrl}${defaultsInfo})`,
   );
