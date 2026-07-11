@@ -1,4 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer as createHttpServer } from "node:http";
+import { randomUUID } from "node:crypto";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer } from "./server.js";
+import type { OpenCodeClient } from "./client.js";
 
 export interface HttpConfig {
   host: string;
@@ -106,4 +111,67 @@ export function makeHandler(args: {
       }
     });
   };
+}
+
+function isLocalhost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+/**
+ * Start the MCP server over Streamable HTTP. Resolves config from env,
+ * builds one McpServer + one transport, and listens on a node:http server.
+ */
+export async function startHttp(
+  client: OpenCodeClient,
+  baseUrl: string,
+): Promise<void> {
+  const cfg = resolveHttpConfig(process.env);
+
+  const local = isLocalhost(cfg.host);
+  const allowedHosts = local
+    ? [
+        `${cfg.host}:${cfg.port}`,
+        `127.0.0.1:${cfg.port}`,
+        `localhost:${cfg.port}`,
+      ]
+    : undefined;
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    enableDnsRebindingProtection: local,
+    allowedHosts,
+  });
+
+  const server = createServer(client);
+  await server.connect(transport);
+
+  const handler = makeHandler({
+    transport,
+    path: cfg.path,
+    token: cfg.token,
+  });
+
+  const httpServer = createHttpServer(handler);
+
+  await new Promise<void>((resolve) => {
+    httpServer.listen(cfg.port, cfg.host, () => resolve());
+  });
+
+  console.error(
+    `opencode-mcp v1.11.0 started (HTTP transport on ` +
+      `http://${cfg.host}:${cfg.port}${cfg.path} | OpenCode server at ${baseUrl})`,
+  );
+
+  const shutdown = () => {
+    void transport.close();
+    httpServer.close();
+  };
+  process.on("SIGINT", () => {
+    shutdown();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    shutdown();
+    process.exit(0);
+  });
 }
