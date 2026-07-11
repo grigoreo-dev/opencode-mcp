@@ -42,8 +42,13 @@ export function resolveHttpConfig(
 
   const host = env.OPENCODE_MCP_HTTP_HOST || "127.0.0.1";
   const port = env.OPENCODE_MCP_HTTP_PORT
-    ? parseInt(env.OPENCODE_MCP_HTTP_PORT, 10)
+    ? Number(env.OPENCODE_MCP_HTTP_PORT)
     : 3000;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(
+      `Invalid OPENCODE_MCP_HTTP_PORT="${env.OPENCODE_MCP_HTTP_PORT}" (must be an integer 1-65535).`,
+    );
+  }
   let path = env.OPENCODE_MCP_HTTP_PATH || "/mcp";
   if (!path.startsWith("/")) path = "/" + path;
 
@@ -153,8 +158,12 @@ export async function startHttp(
 
   const httpServer = createHttpServer(handler);
 
-  await new Promise<void>((resolve) => {
-    httpServer.listen(cfg.port, cfg.host, () => resolve());
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once("error", reject);
+    httpServer.listen(cfg.port, cfg.host, () => {
+      httpServer.removeListener("error", reject);
+      resolve();
+    });
   });
 
   console.error(

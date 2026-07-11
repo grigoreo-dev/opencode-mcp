@@ -10,6 +10,7 @@ function mockRes() {
     statusCode: 0,
     headers: {} as Record<string, string>,
     body: "",
+    headersSent: false,
     setHeader(k: string, v: string) { this.headers[k] = v; },
     writeHead(code: number) { this.statusCode = code; return this; },
     end(chunk?: string) { if (chunk) this.body += chunk; },
@@ -55,6 +56,17 @@ describe("resolveHttpConfig", () => {
   it("normalizes a path without leading slash", () => {
     const cfg = resolveHttpConfig({ OPENCODE_MCP_HTTP_TOKEN: "t", OPENCODE_MCP_HTTP_PATH: "mcp" });
     expect(cfg.path).toBe("/mcp");
+  });
+
+  it("throws on a non-numeric port", () => {
+    expect(() =>
+      resolveHttpConfig({ OPENCODE_MCP_HTTP_TOKEN: "t", OPENCODE_MCP_HTTP_PORT: "abc" }),
+    ).toThrow(/OPENCODE_MCP_HTTP_PORT/);
+  });
+  it("throws on an out-of-range port", () => {
+    expect(() =>
+      resolveHttpConfig({ OPENCODE_MCP_HTTP_TOKEN: "t", OPENCODE_MCP_HTTP_PORT: "70000" }),
+    ).toThrow(/OPENCODE_MCP_HTTP_PORT/);
   });
 });
 
@@ -110,5 +122,15 @@ describe("makeHandler", () => {
     handler(req, res);
     await new Promise((r) => setImmediate(r));
     expect(transport.handleRequest).toHaveBeenCalled();
+  });
+
+  it("returns 500 JSON-RPC when transport.handleRequest rejects (headers not sent)", async () => {
+    const transport = { handleRequest: vi.fn().mockRejectedValue(new Error("boom")) };
+    const handler = makeHandler({ transport, path: "/mcp" });
+    const res = mockRes();
+    handler(mockReq("POST", "/mcp"), res);
+    await new Promise((r) => setImmediate(r));
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body).error.code).toBe(-32603);
   });
 });
