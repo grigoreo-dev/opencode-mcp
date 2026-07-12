@@ -251,4 +251,54 @@ describe("makeHandler (session map)", () => {
     await new Promise((r) => setImmediate(r));
     expect(created[0].handleRequest).toHaveBeenCalledTimes(2);
   });
+
+  it("logs session lifecycle to stderr when OPENCODE_MCP_DEBUG=true", async () => {
+    const prev = process.env.OPENCODE_MCP_DEBUG;
+    process.env.OPENCODE_MCP_DEBUG = "true";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { factory, created } = mockTransportFactory(["s1"]);
+      const handler = makeHandler({ createTransport: factory, path: "/mcp" });
+
+      // initialize → INIT + OPEN
+      handler(mockReq("POST", "/mcp", {}), mockRes(), initializeBody());
+      await new Promise((r) => setImmediate(r));
+      // follow-up → ROUTE
+      handler(mockReq("POST", "/mcp", { "mcp-session-id": "s1" }), mockRes(), { jsonrpc: "2.0", method: "tools/list", id: 2 });
+      await new Promise((r) => setImmediate(r));
+      // close → CLOSE
+      created[0].close();
+      // unknown → UNKNOWN
+      handler(mockReq("POST", "/mcp", { "mcp-session-id": "s1" }), mockRes(), { jsonrpc: "2.0", method: "tools/list", id: 3 });
+      await new Promise((r) => setImmediate(r));
+
+      const logs = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logs).toMatch(/INIT\s+new session requested/);
+      expect(logs).toMatch(/OPEN\s+session=s1, active=1/);
+      expect(logs).toMatch(/ROUTE\s+session=s1 POST method=tools\/list/);
+      expect(logs).toMatch(/CLOSE\s+session=s1, active=0/);
+      expect(logs).toMatch(/UNKNOWN session=s1/);
+    } finally {
+      errSpy.mockRestore();
+      if (prev === undefined) delete process.env.OPENCODE_MCP_DEBUG;
+      else process.env.OPENCODE_MCP_DEBUG = prev;
+    }
+  });
+
+  it("does not log lifecycle when OPENCODE_MCP_DEBUG is not set", async () => {
+    const prev = process.env.OPENCODE_MCP_DEBUG;
+    delete process.env.OPENCODE_MCP_DEBUG;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { factory } = mockTransportFactory(["s1"]);
+      const handler = makeHandler({ createTransport: factory, path: "/mcp" });
+      handler(mockReq("POST", "/mcp", {}), mockRes(), initializeBody());
+      await new Promise((r) => setImmediate(r));
+      const logs = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logs).not.toMatch(/\[mcp-session/);
+    } finally {
+      errSpy.mockRestore();
+      if (prev !== undefined) process.env.OPENCODE_MCP_DEBUG = prev;
+    }
+  });
 });

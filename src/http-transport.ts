@@ -113,6 +113,22 @@ function isInitializeRequest(body: unknown): boolean {
  *
  * Exposes `closeAll()` on the returned handler for shutdown.
  */
+/** Session lifecycle debug logs; enabled via OPENCODE_MCP_DEBUG=true. */
+const debugEnabled = () => process.env.OPENCODE_MCP_DEBUG === "true";
+function debugLog(msg: string): void {
+  if (debugEnabled()) {
+    console.error(`[mcp-session ${new Date().toISOString()}] ${msg}`);
+  }
+}
+
+/** Extract the JSON-RPC method name(s) from a request body for logging. */
+function methodOf(body: unknown): string {
+  if (Array.isArray(body)) {
+    return body.map((m) => (m as any)?.method ?? "?").join(",");
+  }
+  return (body as any)?.method ?? (body === undefined ? "(stream)" : "?");
+}
+
 export function makeHandler(args: {
   createTransport: TransportFactory;
   path: string;
@@ -165,9 +181,15 @@ export function makeHandler(args: {
       const transport = sessions.get(sessionId);
       if (!transport) {
         // Unknown session id: instruct the client to start a new session.
+        debugLog(
+          `UNKNOWN session=${sessionId} ${req.method} method=${methodOf(body)} → 404 (client will re-initialize)`,
+        );
         sendJsonRpcError(res, 404, -32001, "Session not found");
         return;
       }
+      debugLog(
+        `ROUTE   session=${sessionId} ${req.method} method=${methodOf(body)}`,
+      );
       delegate(transport);
       return;
     }
@@ -176,18 +198,27 @@ export function makeHandler(args: {
       // New session: build a fresh transport + server pair so a second
       // initialize (reconnecting client) never hits an already-initialized
       // server instance.
+      debugLog(
+        `INIT    new session requested (${req.socket?.remoteAddress ?? "?"}), active=${sessions.size}`,
+      );
       let transportRef: TransportLike | undefined;
       void Promise.resolve(
         createTransport({
           onsessioninitialized: (id) => {
             if (transportRef) sessions.set(id, transportRef);
+            debugLog(`OPEN    session=${id}, active=${sessions.size}`);
           },
         }),
       )
         .then((transport) => {
           transportRef = transport;
           transport.onclose = () => {
-            if (transport.sessionId) sessions.delete(transport.sessionId);
+            if (transport.sessionId) {
+              sessions.delete(transport.sessionId);
+              debugLog(
+                `CLOSE   session=${transport.sessionId}, active=${sessions.size}`,
+              );
+            }
           };
           delegate(transport);
         })
@@ -205,11 +236,15 @@ export function makeHandler(args: {
     }
 
     // No session header on a non-initialize request: malformed.
+    debugLog(
+      `REJECT  no session id, method=${methodOf(body)} → 400 (session required)`,
+    );
     sendJsonRpcError(res, 400, -32000, "Bad Request: Session ID required");
   };
 
   handler.closeAll = async (): Promise<void> => {
     const all = [...sessions.values()];
+    debugLog(`SHUTDOWN closing ${all.length} session(s)`);
     sessions.clear();
     await Promise.allSettled(all.map((t) => t.close()));
   };
