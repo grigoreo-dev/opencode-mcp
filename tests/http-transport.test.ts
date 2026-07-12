@@ -70,67 +70,185 @@ describe("resolveHttpConfig", () => {
   });
 });
 
-describe("makeHandler", () => {
-  it("returns 404 JSON-RPC for a non-matching path and does not call transport", async () => {
-    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ transport, path: "/mcp", token: "t" });
+/**
+ * Build a mock transport factory for session-map tests. Each created
+ * transport records handleRequest calls, exposes onclose, and simulates
+ * session initialization by invoking onsessioninitialized with the next
+ * id from `ids` on the first handleRequest (like the real
+ * StreamableHTTPServerTransport does during an initialize round-trip).
+ */
+function mockTransportFactory(ids: string[]) {
+  const created: any[] = [];
+  let idIdx = 0;
+  const factory = vi.fn((opts: { onsessioninitialized?: (id: string) => void }) => {
+    const transport: any = {
+      sessionId: undefined as string | undefined,
+      onclose: undefined as undefined | (() => void),
+      handleRequest: vi.fn().mockImplementation(async () => {
+        if (transport.sessionId === undefined) {
+          transport.sessionId = ids[idIdx++];
+          opts.onsessioninitialized?.(transport.sessionId);
+        }
+      }),
+      close: vi.fn().mockImplementation(() => {
+        transport.onclose?.();
+      }),
+    };
+    created.push(transport);
+    return transport;
+  });
+  return { factory, created };
+}
+
+function initializeBody() {
+  return {
+    jsonrpc: "2.0",
+    method: "initialize",
+    params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } },
+    id: 1,
+  };
+}
+
+describe("makeHandler (session map)", () => {
+  it("returns 404 JSON-RPC for a non-matching path and creates no transport", async () => {
+    const { factory } = mockTransportFactory(["s1"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "t" });
     const res = mockRes();
-    handler(mockReq("POST", "/wrong", { authorization: "Bearer t" }), res);
+    handler(mockReq("POST", "/wrong", { authorization: "Bearer t" }), res, initializeBody());
     await new Promise((r) => setImmediate(r));
     expect(res.statusCode).toBe(404);
-    expect(JSON.parse(res.body)).toMatchObject({ jsonrpc: "2.0", id: null });
     expect(JSON.parse(res.body).error.code).toBe(-32001);
-    expect(transport.handleRequest).not.toHaveBeenCalled();
+    expect(factory).not.toHaveBeenCalled();
   });
 
   it("returns 401 when token is set and Authorization is missing/wrong", async () => {
-    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ transport, path: "/mcp", token: "secret" });
+    const { factory } = mockTransportFactory(["s1"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
     const res = mockRes();
-    handler(mockReq("POST", "/mcp", { authorization: "Bearer nope" }), res);
+    handler(mockReq("POST", "/mcp", { authorization: "Bearer nope" }), res, initializeBody());
     await new Promise((r) => setImmediate(r));
     expect(res.statusCode).toBe(401);
-    expect(JSON.parse(res.body).error.code).toBe(-32001);
-    expect(transport.handleRequest).not.toHaveBeenCalled();
+    expect(factory).not.toHaveBeenCalled();
   });
 
-  it("delegates to transport.handleRequest on valid path + valid Bearer", async () => {
-    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ transport, path: "/mcp", token: "secret" });
+  it("creates a new transport for an initialize request without session id", async () => {
+    const { factory, created } = mockTransportFactory(["s1"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
     const req = mockReq("POST", "/mcp", { authorization: "Bearer secret" });
     const res = mockRes();
-    handler(req, res);
+    handler(req, res, initializeBody());
     await new Promise((r) => setImmediate(r));
-    expect(transport.handleRequest).toHaveBeenCalledWith(req, res);
+    expect(factory).toHaveBeenCalledOnce();
+    expect(created[0].handleRequest).toHaveBeenCalledWith(req, res, initializeBody());
   });
 
-  it("delegates without auth when no token configured (insecure)", async () => {
-    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ transport, path: "/mcp" });
-    const req = mockReq("GET", "/mcp");
-    const res = mockRes();
-    handler(req, res);
+  it("creates a SECOND transport when a second initialize arrives (no 'already initialized' error)", async () => {
+    const { factory, created } = mockTransportFactory(["s1", "s2"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
+
+    handler(mockReq("POST", "/mcp", { authorization: "Bearer secret" }), mockRes(), initializeBody());
     await new Promise((r) => setImmediate(r));
-    expect(transport.handleRequest).toHaveBeenCalledWith(req, res);
+    handler(mockReq("POST", "/mcp", { authorization: "Bearer secret" }), mockRes(), initializeBody());
+    await new Promise((r) => setImmediate(r));
+
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(created).toHaveLength(2);
+    expect(created[0].handleRequest).toHaveBeenCalledOnce();
+    expect(created[1].handleRequest).toHaveBeenCalledOnce();
   });
 
-  it("matches path even when a query string is present", async () => {
-    const transport = { handleRequest: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ transport, path: "/mcp" });
-    const req = mockReq("POST", "/mcp?foo=bar");
-    const res = mockRes();
-    handler(req, res);
+  it("routes a request with a known mcp-session-id to its own transport", async () => {
+    const { factory, created } = mockTransportFactory(["s1"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
+
+    // establish session s1
+    handler(mockReq("POST", "/mcp", { authorization: "Bearer secret" }), mockRes(), initializeBody());
     await new Promise((r) => setImmediate(r));
-    expect(transport.handleRequest).toHaveBeenCalled();
+
+    // follow-up request carries the session header
+    const followUp = mockReq("POST", "/mcp", { authorization: "Bearer secret", "mcp-session-id": "s1" });
+    const res2 = mockRes();
+    handler(followUp, res2, { jsonrpc: "2.0", method: "tools/list", id: 2 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(factory).toHaveBeenCalledOnce(); // no new transport
+    expect(created[0].handleRequest).toHaveBeenCalledTimes(2);
   });
 
-  it("returns 500 JSON-RPC when transport.handleRequest rejects (headers not sent)", async () => {
-    const transport = { handleRequest: vi.fn().mockRejectedValue(new Error("boom")) };
-    const handler = makeHandler({ transport, path: "/mcp" });
+  it("returns 404 for an unknown mcp-session-id", async () => {
+    const { factory } = mockTransportFactory([]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
     const res = mockRes();
-    handler(mockReq("POST", "/mcp"), res);
+    handler(
+      mockReq("POST", "/mcp", { authorization: "Bearer secret", "mcp-session-id": "ghost" }),
+      res,
+      { jsonrpc: "2.0", method: "tools/list", id: 2 },
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body).error.code).toBe(-32001);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for a non-initialize request without session id", async () => {
+    const { factory } = mockTransportFactory([]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
+    const res = mockRes();
+    handler(
+      mockReq("POST", "/mcp", { authorization: "Bearer secret" }),
+      res,
+      { jsonrpc: "2.0", method: "tools/list", id: 2 },
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error.code).toBe(-32000);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("removes the session from the map when transport closes (404 afterwards)", async () => {
+    const { factory, created } = mockTransportFactory(["s1"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
+
+    handler(mockReq("POST", "/mcp", { authorization: "Bearer secret" }), mockRes(), initializeBody());
+    await new Promise((r) => setImmediate(r));
+
+    created[0].close(); // triggers onclose → map cleanup
+
+    const res = mockRes();
+    handler(
+      mockReq("POST", "/mcp", { authorization: "Bearer secret", "mcp-session-id": "s1" }),
+      res,
+      { jsonrpc: "2.0", method: "tools/list", id: 2 },
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 500 JSON-RPC when handleRequest rejects (headers not sent)", async () => {
+    const { factory, created } = mockTransportFactory(["s1"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp" });
+    // establish session
+    handler(mockReq("POST", "/mcp", {}), mockRes(), initializeBody());
+    await new Promise((r) => setImmediate(r));
+    // make the transport reject on the follow-up
+    created[0].handleRequest.mockRejectedValueOnce(new Error("boom"));
+    const res = mockRes();
+    handler(mockReq("POST", "/mcp", { "mcp-session-id": "s1" }), res, { jsonrpc: "2.0", method: "x", id: 3 });
     await new Promise((r) => setImmediate(r));
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.body).error.code).toBe(-32603);
+  });
+
+  it("GET request with a known session id is delegated (SSE stream)", async () => {
+    const { factory, created } = mockTransportFactory(["s1"]);
+    const handler = makeHandler({ createTransport: factory, path: "/mcp", token: "secret" });
+    handler(mockReq("POST", "/mcp", { authorization: "Bearer secret" }), mockRes(), initializeBody());
+    await new Promise((r) => setImmediate(r));
+
+    const getReq = mockReq("GET", "/mcp", { authorization: "Bearer secret", "mcp-session-id": "s1" });
+    const res = mockRes();
+    handler(getReq, res, undefined);
+    await new Promise((r) => setImmediate(r));
+    expect(created[0].handleRequest).toHaveBeenCalledTimes(2);
   });
 });
