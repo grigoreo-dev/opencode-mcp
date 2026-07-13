@@ -1,6 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer as createHttpServer } from "node:http";
-import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "./server.js";
 import type { OpenCodeClient } from "./client.js";
@@ -56,8 +55,6 @@ export function resolveHttpConfig(
 }
 
 interface TransportLike {
-  sessionId?: string;
-  onclose?: () => void;
   handleRequest(
     req: IncomingMessage,
     res: ServerResponse,
@@ -67,14 +64,11 @@ interface TransportLike {
 }
 
 /**
- * Factory that builds a fresh transport for a new MCP session. The factory
- * receives an `onsessioninitialized` callback which MUST be invoked with the
- * session id once the transport has completed the initialize round-trip
- * (StreamableHTTPServerTransport does this natively).
+ * Factory that builds a fresh transport (already connected to a fresh
+ * McpServer) for a single request. Stateless mode: the pair serves one
+ * HTTP request and is then garbage-collected.
  */
-export type TransportFactory = (opts: {
-  onsessioninitialized: (sessionId: string) => void;
-}) => TransportLike | Promise<TransportLike>;
+export type TransportFactory = () => TransportLike | Promise<TransportLike>;
 
 function sendJsonRpcError(
   res: ServerResponse,
@@ -91,33 +85,11 @@ function sendJsonRpcError(
   res.end(payload);
 }
 
-function isInitializeRequest(body: unknown): boolean {
-  if (Array.isArray(body)) {
-    return body.some(
-      (m) => m && typeof m === "object" && (m as any).method === "initialize",
-    );
-  }
-  return (
-    !!body && typeof body === "object" && (body as any).method === "initialize"
-  );
-}
-
-/**
- * Build the node:http request handler with per-session transports:
- * path routing + optional bearer auth, then route by Mcp-Session-Id —
- * an initialize request without a session creates a fresh transport
- * (fixing "Server already initialized" for reconnecting clients),
- * known sessions are delegated to their own transport, unknown sessions
- * get 404 (client restarts the session), and non-initialize requests
- * without a session get 400.
- *
- * Exposes `closeAll()` on the returned handler for shutdown.
- */
-/** Session lifecycle debug logs; enabled via OPENCODE_MCP_DEBUG=true. */
+/** Request debug logs; enabled via OPENCODE_MCP_DEBUG=true. */
 const debugEnabled = () => process.env.OPENCODE_MCP_DEBUG === "true";
 function debugLog(msg: string): void {
   if (debugEnabled()) {
-    console.error(`[mcp-session ${new Date().toISOString()}] ${msg}`);
+    console.error(`[mcp-http ${new Date().toISOString()}] ${msg}`);
   }
 }
 
@@ -129,21 +101,21 @@ function methodOf(body: unknown): string {
   return (body as any)?.method ?? (body === undefined ? "(stream)" : "?");
 }
 
+/**
+ * Build the node:http request handler: path routing + optional bearer
+ * auth, then hand the request to a FRESH transport+server pair from the
+ * factory (stateless mode — no session map, nothing retained between
+ * requests, no "Server already initialized" possible, no leak possible).
+ * Any Mcp-Session-Id header a client still sends is simply ignored.
+ */
 export function makeHandler(args: {
   createTransport: TransportFactory;
   path: string;
   token?: string;
-}): ((req: IncomingMessage, res: ServerResponse, body?: unknown) => void) & {
-  closeAll: () => Promise<void>;
-} {
+}): (req: IncomingMessage, res: ServerResponse, body?: unknown) => void {
   const { createTransport, path, token } = args;
-  const sessions = new Map<string, TransportLike>();
 
-  const handler = (
-    req: IncomingMessage,
-    res: ServerResponse,
-    body?: unknown,
-  ): void => {
+  return (req, res, body) => {
     // 1. Route by pathname (ignore query string).
     const pathname = (req.url || "").split("?")[0];
     if (pathname !== path) {
@@ -158,102 +130,23 @@ export function makeHandler(args: {
         return;
       }
     }
-
-    // 3. Session routing.
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-    const delegate = (transport: TransportLike) => {
-      void Promise.resolve(transport.handleRequest(req, res, body)).catch(
-        (err) => {
-          console.error(
-            `HTTP transport handleRequest error: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          if (!res.headersSent) {
-            sendJsonRpcError(res, 500, -32603, "Internal server error");
-          }
-        },
-      );
-    };
-
-    if (sessionId) {
-      const transport = sessions.get(sessionId);
-      if (!transport) {
-        // Unknown session id: instruct the client to start a new session.
-        debugLog(
-          `UNKNOWN session=${sessionId} ${req.method} method=${methodOf(body)} → 404 (client will re-initialize)`,
-        );
-        sendJsonRpcError(res, 404, -32001, "Session not found");
-        return;
-      }
-      debugLog(
-        `ROUTE   session=${sessionId} ${req.method} method=${methodOf(body)}`,
-      );
-      delegate(transport);
-      return;
-    }
-
-    if (isInitializeRequest(body)) {
-      // New session: build a fresh transport + server pair so a second
-      // initialize (reconnecting client) never hits an already-initialized
-      // server instance.
-      debugLog(
-        `INIT    new session requested (${req.socket?.remoteAddress ?? "?"}), active=${sessions.size}`,
-      );
-      let transportRef: TransportLike | undefined;
-      void Promise.resolve(
-        createTransport({
-          onsessioninitialized: (id) => {
-            if (transportRef) sessions.set(id, transportRef);
-            debugLog(`OPEN    session=${id}, active=${sessions.size}`);
-          },
-        }),
-      )
-        .then((transport) => {
-          transportRef = transport;
-          transport.onclose = () => {
-            if (transport.sessionId) {
-              sessions.delete(transport.sessionId);
-              debugLog(
-                `CLOSE   session=${transport.sessionId}, active=${sessions.size}`,
-              );
-            }
-          };
-          delegate(transport);
-        })
-        .catch((err) => {
-          console.error(
-            `Failed to create MCP transport: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          if (!res.headersSent) {
-            sendJsonRpcError(res, 500, -32603, "Internal server error");
-          }
-        });
-      return;
-    }
-
-    // No session header on a non-initialize request: malformed.
+    // 3. Fresh transport per request; GC reclaims it after the response.
     debugLog(
-      `REJECT  no session id, method=${methodOf(body)} → 400 (session required)`,
+      `REQ     ${req.method} method=${methodOf(body)} (${req.socket?.remoteAddress ?? "?"})`,
     );
-    sendJsonRpcError(res, 400, -32000, "Bad Request: Session ID required");
+    void Promise.resolve(createTransport())
+      .then((transport) => transport.handleRequest(req, res, body))
+      .catch((err) => {
+        console.error(
+          `HTTP transport error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        if (!res.headersSent) {
+          sendJsonRpcError(res, 500, -32603, "Internal server error");
+        }
+      });
   };
-
-  handler.closeAll = async (): Promise<void> => {
-    const all = [...sessions.values()];
-    debugLog(`SHUTDOWN closing ${all.length} session(s)`);
-    sessions.clear();
-    await Promise.allSettled(all.map((t) => t.close()));
-  };
-
-  return handler;
-}
-
-function isLocalhost(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
 /** Read and JSON-parse a request body (for POST/DELETE). */
@@ -274,10 +167,11 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 }
 
 /**
- * Start the MCP server over Streamable HTTP. Resolves config from env and
- * listens on a node:http server. Each MCP session gets its own
- * StreamableHTTPServerTransport + McpServer pair, stored in a session map
- * keyed by Mcp-Session-Id (see makeHandler).
+ * Start the MCP server over Streamable HTTP in stateless mode. Each HTTP
+ * request gets its own StreamableHTTPServerTransport + McpServer pair
+ * (sessionIdGenerator: undefined — no sessions, no session state, no
+ * cleanup needed). The expensive resource — the OpenCode HTTP client —
+ * is shared across all requests.
  */
 export async function startHttp(
   client: OpenCodeClient,
@@ -285,23 +179,9 @@ export async function startHttp(
 ): Promise<void> {
   const cfg = resolveHttpConfig(process.env);
 
-  const local = isLocalhost(cfg.host);
-  const allowedHosts = local
-    ? [
-        `${cfg.host}:${cfg.port}`,
-        `127.0.0.1:${cfg.port}`,
-        `localhost:${cfg.port}`,
-      ]
-    : undefined;
-
-  const createTransport: TransportFactory = async ({
-    onsessioninitialized,
-  }) => {
+  const createTransport: TransportFactory = async () => {
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      enableDnsRebindingProtection: local,
-      allowedHosts,
-      onsessioninitialized,
+      sessionIdGenerator: undefined, // stateless
     });
     const server = createServer(client);
     await server.connect(transport);
@@ -315,8 +195,8 @@ export async function startHttp(
   });
 
   const httpServer = createHttpServer((req, res) => {
-    // StreamableHTTPServerTransport parses GET/DELETE itself; for POST we
-    // must hand it the parsed body since we consumed the stream for routing.
+    // The transport needs the parsed body for POST since we consume the
+    // stream here for routing decisions.
     if (req.method === "POST") {
       void readBody(req)
         .then((body) => handler(req, res, body))
@@ -346,12 +226,11 @@ export async function startHttp(
   });
 
   console.error(
-    `opencode-mcp v1.11.0 started (HTTP transport on ` +
+    `opencode-mcp v1.11.0 started (HTTP transport, stateless, on ` +
       `http://${cfg.host}:${cfg.port}${cfg.path} | OpenCode server at ${baseUrl})`,
   );
 
   const shutdown = () => {
-    void handler.closeAll();
     httpServer.close();
   };
   process.on("SIGINT", () => {
