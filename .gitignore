@@ -11,3 +11,9 @@ projects/
 # Local review/scratch artifacts (e.g. dumped PR comments)
 pr_comments.txt
 *_comments.txt
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
