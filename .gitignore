@@ -17,3 +17,4 @@ pr_comments.txt
 *.db
 .beads-credential-key
 .beads/proxieddb/
+.worktrees/
