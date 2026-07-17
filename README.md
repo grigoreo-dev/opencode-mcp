@@ -203,6 +203,19 @@ npm run dev      # watch mode
 npm test         # 328 tests
 ```
 
+### Local HTTP transport
+
+```bash
+cp .env.example .env   # set OPENCODE_MCP_HTTP_TOKEN
+npm run build
+npm run dev:http
+npm run dev:http -- --host 0.0.0.0 --port 3001
+npm run dev:http -- --insecure   # no token; local only
+```
+
+Endpoint: `http://<host>:<port>/mcp` (default `http://127.0.0.1:3000/mcp`).
+Send `Authorization: Bearer <token>` when a token is configured.
+
 ### Smoke Testing
 
 End-to-end test against a running OpenCode server:
